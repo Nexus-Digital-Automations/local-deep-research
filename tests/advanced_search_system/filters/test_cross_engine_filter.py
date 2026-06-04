@@ -343,6 +343,85 @@ class TestFilterResultsReorder:
         assert filtered[2]["title"] == "Third"
 
 
+class TestFilterResultsBatching:
+    """Tests for batched ranking that covers candidates beyond one context window."""
+
+    def test_ranks_candidates_beyond_context_window(self):
+        """Candidates past the first batch are ranked, not silently dropped."""
+        from local_deep_research.advanced_search_system.filters.cross_engine_filter import (
+            CrossEngineFilter,
+        )
+
+        mock_model = Mock()
+        # Each batch reports its first three (local) results as relevant.
+        mock_model.invoke.return_value = Mock(content="[0, 1, 2]")
+
+        filter_instance = CrossEngineFilter(model=mock_model, max_results=100)
+        # Force small context windows so 25 results span three batches.
+        filter_instance.max_context_items = 10
+
+        results = [
+            {"title": f"Result {i}", "snippet": f"Snippet {i}"}
+            for i in range(25)
+        ]
+
+        filtered = filter_instance.filter_results(results, "query")
+
+        # Three batches: [0..9], [10..19], [20..24] -> one invoke each.
+        assert mock_model.invoke.call_count == 3
+        # A third-batch result (global index 20) must survive ranking.
+        titles = {r["title"] for r in filtered}
+        assert "Result 20" in titles
+        # Round-robin merge surfaces each batch's top pick first.
+        assert filtered[0]["title"] == "Result 0"
+        assert filtered[1]["title"] == "Result 10"
+        assert filtered[2]["title"] == "Result 20"
+
+    def test_max_results_param_overrides_instance(self):
+        """A per-call max_results overrides the instance default."""
+        from local_deep_research.advanced_search_system.filters.cross_engine_filter import (
+            CrossEngineFilter,
+        )
+
+        mock_model = Mock()
+        mock_model.invoke.return_value = Mock(content="[0, 1, 2, 3, 4, 5]")
+
+        filter_instance = CrossEngineFilter(model=mock_model, max_results=100)
+
+        results = [{"title": f"Result {i}"} for i in range(15)]
+
+        filtered = filter_instance.filter_results(
+            results, "query", max_results=2
+        )
+
+        assert len(filtered) <= 2
+
+    def test_snippet_cap_uses_800_chars(self):
+        """Snippets are truncated at 800 chars (not 200) before reaching the LLM."""
+        from local_deep_research.advanced_search_system.filters.cross_engine_filter import (
+            CrossEngineFilter,
+        )
+
+        mock_model = Mock()
+        mock_model.invoke.return_value = Mock(content="[0]")
+
+        filter_instance = CrossEngineFilter(model=mock_model, max_results=100)
+
+        long_snippet = "x" * 1000
+        results = [
+            {"title": f"Result {i}", "snippet": long_snippet}
+            for i in range(15)
+        ]
+
+        filter_instance.filter_results(results, "query")
+
+        prompt = mock_model.invoke.call_args[0][0]
+        # 800 chars survive; the 201st-800th chars would be absent under the old cap.
+        assert "x" * 800 in prompt
+        # The full 1000-char snippet must not appear (it was truncated).
+        assert "x" * 1000 not in prompt
+
+
 class TestInheritance:
     """Tests for CrossEngineFilter inheritance."""
 

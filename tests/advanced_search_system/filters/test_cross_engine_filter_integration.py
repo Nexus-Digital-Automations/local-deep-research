@@ -448,7 +448,8 @@ class TestCrossEngineFilterContextGeneration:
     """Tests for context generation passed to LLM."""
 
     def test_long_snippets_truncated(self):
-        """Should truncate long snippets to 200 chars."""
+        """Should truncate long snippets to 800 chars (kept in sync with the
+        per-engine relevance filter, which uses 800)."""
         from local_deep_research.advanced_search_system.filters.cross_engine_filter import (
             CrossEngineFilter,
         )
@@ -458,7 +459,7 @@ class TestCrossEngineFilterContextGeneration:
 
         filter_instance = CrossEngineFilter(model=mock_model, max_results=100)
 
-        long_snippet = "x" * 500
+        long_snippet = "x" * 1000
         results = [
             {"title": "Test", "snippet": long_snippet, "engine": "google"}
             for _ in range(15)
@@ -468,9 +469,10 @@ class TestCrossEngineFilterContextGeneration:
 
         # Check the prompt passed to invoke
         call_args = mock_model.invoke.call_args[0][0]
-        # Should contain truncated snippet (200 chars + "...")
+        # Should contain truncated snippet (800 chars + "...")
         assert "..." in call_args
-        assert "x" * 500 not in call_args
+        assert "x" * 800 in call_args
+        assert "x" * 1000 not in call_args
 
     def test_max_30_results_in_context(self):
         """Should limit context to 30 results."""
