@@ -409,8 +409,7 @@ class TestFilterResultsBatching:
 
         long_snippet = "x" * 1000
         results = [
-            {"title": f"Result {i}", "snippet": long_snippet}
-            for i in range(15)
+            {"title": f"Result {i}", "snippet": long_snippet} for i in range(15)
         ]
 
         filter_instance.filter_results(results, "query")

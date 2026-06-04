@@ -302,7 +302,9 @@ If no results seem relevant to the query, return an empty array: []"""
             )
 
         # Limit results if needed
-        final_results = ranked_results[: min(effective_max, len(ranked_results))]
+        final_results = ranked_results[
+            : min(effective_max, len(ranked_results))
+        ]
 
         logger.info(
             f"Cross-engine filtering kept {len(final_results)} out of {len(results)} results with reordering={reorder}, reindex={reindex}"
