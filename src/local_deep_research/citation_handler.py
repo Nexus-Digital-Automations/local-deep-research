@@ -36,6 +36,7 @@ class CitationHandler:
         # For backward compatibility, expose internal methods
         self._create_documents = self._handler._create_documents
         self._format_sources = self._handler._format_sources
+        self._format_sources_block = self._handler._format_sources_block
 
     def _create_handler(self, handler_type: str):
         """Create the appropriate citation handler based on type."""

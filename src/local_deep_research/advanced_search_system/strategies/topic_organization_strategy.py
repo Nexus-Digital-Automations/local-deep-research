@@ -9,6 +9,7 @@ from .source_based_strategy import SourceBasedSearchStrategy
 from .focused_iteration_strategy import FocusedIterationStrategy
 from ..findings.topic import Topic, TopicGraph
 from ..findings.repository import FindingsRepository
+from ...citation_handlers.source_guard import guard_untrusted_sources
 from ...utilities.json_utils import extract_json, get_llm_response_text
 from ...utilities.thread_context import preserve_research_context
 
@@ -211,7 +212,9 @@ class TopicOrganizationStrategy(BaseSearchStrategy):
                 )
 
             existing_topics_str = (
-                "\n\n".join(topics_info) if topics_info else "No topics yet"
+                guard_untrusted_sources("\n\n".join(topics_info))
+                if topics_info
+                else "No topics yet"
             )
 
             # Calculate progress
@@ -225,6 +228,15 @@ class TopicOrganizationStrategy(BaseSearchStrategy):
             ideal_topics = int(math.sqrt(total_sources))
             ideal_sources_per_topic = ideal_topics  # Same as number of topics
             current_topics = len(topics)
+
+            # Wrap the (untrusted) source fields in the prompt-injection guard.
+            current_source_block = guard_untrusted_sources(
+                "Title: {}\nURL: {}\nSnippet: {}".format(
+                    source.get("title", "Untitled"),
+                    source.get("link", ""),
+                    source.get("snippet", ""),
+                )
+            )
 
             # Create prompt for this specific source
             source_prompt = f"""
@@ -247,9 +259,7 @@ GUIDELINES:
 - Use "d" ONLY for sources that are COMPLETELY UNRELATED (e.g., wrong topic entirely, spam, or error pages). When in doubt, keep the source!
 
 CURRENT SOURCE TO CATEGORIZE:
-Title: {source.get("title", "Untitled")}
-URL: {source.get("link", "")}
-Snippet: {source.get("snippet", "")}
+{current_source_block}
 
 EXISTING TOPICS (showing source count):
 {existing_topics_str}
@@ -461,7 +471,7 @@ Response:"""
 Topic: {topic.title}
 
 Sources in this topic:
-{chr(10).join(sources_list)}
+{guard_untrusted_sources(chr(10).join(sources_list))}
 
 Other topics (context):
 {chr(10).join(other_topic_context) if other_topic_context else "None"}
@@ -645,10 +655,10 @@ Select the best lead source for this topic cluster.
 
 TOPIC: {topic.title}
 Current sources in this topic:
-{chr(10).join(topic_sources)}
+{guard_untrusted_sources(chr(10).join(topic_sources))}
 
 OTHER TOPICS (for context):
-{chr(10).join(other_leads) if other_leads else "None"}
+{guard_untrusted_sources(chr(10).join(other_leads)) if other_leads else "None"}
 
 Which source number (0-{len(all_sources) - 1}) should be the lead source for this topic?
 The lead should be the most comprehensive and representative source.
@@ -733,10 +743,10 @@ Evaluate which topic each source belongs to based on the lead sources.
 CURRENT TOPIC {i}: {topic.title}
 
 ALL TOPIC LEADS:
-{chr(10).join(all_leads)}
+{guard_untrusted_sources(chr(10).join(all_leads))}
 
 SOURCES TO EVALUATE FROM TOPIC {i}:
-{chr(10).join([s["info"] for s in sources_to_evaluate])}
+{guard_untrusted_sources(chr(10).join([s["info"] for s in sources_to_evaluate]))}
 
 For each source, determine:
 1. Which topic index (0-{len(topics) - 1}) it best fits with
@@ -1631,8 +1641,8 @@ Otherwise, respond with only the follow-up question, nothing else.
             topic_documents = self.citation_handler._create_documents(
                 topic_sources, nr_of_links=0
             )
-            formatted_topic_sources = self.citation_handler._format_sources(
-                topic_documents
+            formatted_topic_sources = (
+                self.citation_handler._format_sources_block(topic_documents)
             )
 
             topic_prompt = f"""CURRENT TOPIC: {topic.title}
@@ -1640,7 +1650,7 @@ SOURCE SNIPPETS FOR THIS TOPIC (partial content):
 {formatted_topic_sources}
 
 OTHER TOPICS BEING COVERED (for context - avoid repeating):
-{chr(10).join(other_leads_info) if other_leads_info else "None"}
+{guard_untrusted_sources(chr(10).join(other_leads_info)) if other_leads_info else "None"}
 
 Write a SHORT paragraph (2-3 sentences) based on these SNIPPETS that:
 1. DIRECTLY ANSWERS aspects of the research question using this topic's sources
@@ -1682,8 +1692,8 @@ RESEARCH QUESTION TO ANSWER: {query}"""
             lead_documents = self.citation_handler._create_documents(
                 lead_sources
             )
-            formatted_lead_sources = self.citation_handler._format_sources(
-                lead_documents
+            formatted_lead_sources = (
+                self.citation_handler._format_sources_block(lead_documents)
             )
 
             summary_prompt = f"""SOURCE SNIPPETS (for citation reference):

@@ -19,7 +19,7 @@ class ForcedAnswerCitationHandler(BaseCitationHandler):
     ) -> Dict[str, Any]:
         """Initial analysis with forced answer generation."""
         documents = self._create_documents(search_results)
-        formatted_sources = self._format_sources(documents)
+        formatted_sources = self._format_sources_block(documents)
 
         current_timestamp = datetime.now(timezone.utc).strftime(
             "%Y-%m-%d %H:%M"
@@ -69,7 +69,7 @@ Example response format:
         documents = self._create_documents(
             search_results, nr_of_links=nr_of_links
         )
-        formatted_sources = self._format_sources(documents)
+        formatted_sources = self._format_sources_block(documents)
 
         # Fact-checking step (if enabled)
         fact_check_response = ""
