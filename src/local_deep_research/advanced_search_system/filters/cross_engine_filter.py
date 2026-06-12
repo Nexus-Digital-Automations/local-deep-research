@@ -9,6 +9,12 @@ from loguru import logger
 from ...utilities.json_utils import extract_json, get_llm_response_text
 from .base_filter import BaseFilter
 
+# Per-preview snippet character cap. Kept in sync with the per-engine relevance
+# filter (web_search_engines/relevance_filter.py:_SNIPPET_CHAR_CAP). 200 was too
+# tight — it truncated academic abstracts before the ranker could judge whether a
+# paper's primary topic matched the query, letting off-topic results rank highly.
+_SNIPPET_CHAR_CAP = 800
+
 
 class CrossEngineFilter(BaseFilter):
     """Filter that ranks and filters results from multiple search engines."""
@@ -78,61 +84,31 @@ class CrossEngineFilter(BaseFilter):
                 result["index"] = str(i + start_index + 1)
         return results
 
-    def filter_results(
-        self,
-        results: List[Dict],
-        query: str,
-        reorder=None,
-        reindex=None,
-        start_index=0,
-        **kwargs,
-    ) -> List[Dict]:
+    def _build_rank_prompt(self, batch, query):
+        """Build the relevance-ranking prompt for one batch of results.
+
+        ``batch`` is a list of ``(global_index, result)`` pairs. Previews are
+        numbered **locally** (0-based) within the batch so the LLM never has to
+        reason about large or sparse indices; callers map the returned local
+        indices back to global ones.
         """
-        Filter and rank search results from multiple engines by relevance.
-
-        Args:
-            results: Combined list of search results from all engines
-            query: The original search query
-            reorder: Whether to reorder results by relevance (default: use instance default)
-            reindex: Whether to update result indices after filtering (default: use instance default)
-            start_index: Starting index for the results (used for continuous indexing)
-            **kwargs: Additional parameters
-
-        Returns:
-            Filtered list of search results
-        """
-        # Use instance defaults if not specified
-        if reorder is None:
-            reorder = self.default_reorder
-        if reindex is None:
-            reindex = self.default_reindex
-
-        if not self.model or len(results) <= 10:  # Don't filter if few results
-            return self._prepare_and_return(
-                results[: min(self.max_results, len(results))],
-                reindex=reindex,
-                start_index=start_index,
-            )
-
-        # Create context for LLM
         preview_context = []
-        for i, result in enumerate(results):
+        for local_idx, (_global_idx, result) in enumerate(batch):
             title = result.get("title", "Untitled").strip()
             snippet = result.get("snippet", "").strip()
             engine = result.get("engine", "Unknown engine")
 
             # Clean up snippet if too long
-            if len(snippet) > 200:
-                snippet = snippet[:200] + "..."
+            if len(snippet) > _SNIPPET_CHAR_CAP:
+                snippet = snippet[:_SNIPPET_CHAR_CAP] + "..."
 
             preview_context.append(
-                f"[{i}] Engine: {engine} | Title: {title}\nSnippet: {snippet}"
+                f"[{local_idx}] Engine: {engine} | Title: {title}\nSnippet: {snippet}"
             )
 
-        max_context_items = min(self.max_context_items, len(preview_context))
-        context = "\n\n".join(preview_context[:max_context_items])
+        context = "\n\n".join(preview_context)
 
-        prompt = f"""You are a search result filter. Your task is to rank search results from multiple engines by relevance to a query.
+        return f"""You are a search result filter. Your task is to rank search results from multiple engines by relevance to a query.
 
 Query: "{query}"
 
@@ -145,90 +121,196 @@ For example: [3, 0, 7, 1]
 
 If no results seem relevant to the query, return an empty array: []"""
 
+    def _rank_batch(self, batch, query):
+        """Rank a single batch via the LLM.
+
+        Returns a list of **global** indices ordered most→least relevant.
+        Returns an empty list when the model parsed a response but kept nothing
+        valid (distinct from the all-filtered case the caller handles), and
+        ``None`` when the response could not be parsed or the call raised — so
+        the caller can tell "rejected all" apart from "filter unavailable".
+        """
+        prompt = self._build_rank_prompt(batch, query)
         try:
-            # Get LLM's evaluation
             response = self.model.invoke(prompt)
             response_text = get_llm_response_text(response)
-            ranked_indices = extract_json(response_text, expected_type=list)
+            ranked_local = extract_json(response_text, expected_type=list)
+        except Exception:
+            logger.exception("Cross-engine batch ranking error")
+            return None
 
-            if ranked_indices is not None:
-                # If not reordering, just filter based on the indices
-                if not reorder:
-                    # Just keep the results that were deemed relevant
-                    filtered_results = []
-                    for idx in sorted(
-                        ranked_indices
-                    ):  # Sort to maintain original order
-                        if 0 <= idx < len(results):
-                            filtered_results.append(results[idx])
+        if ranked_local is None:
+            return None
 
-                    # Limit results if needed
-                    final_results = filtered_results[
-                        : min(self.max_results, len(filtered_results))
-                    ]
+        ordered = []
+        for local_idx in ranked_local:
+            # bool is an int subclass — reject True/False explicitly.
+            if isinstance(local_idx, bool):
+                continue
+            if isinstance(local_idx, int) and 0 <= local_idx < len(batch):
+                ordered.append(batch[local_idx][0])
+        return ordered
 
-                    if not final_results and results:
-                        logger.info(
-                            "Cross-engine filtering removed all "
-                            "results, returning top 10 originals"
-                        )
-                        return self._prepare_and_return(
-                            results[: min(10, len(results))],
-                            reindex=reindex,
-                            start_index=start_index,
-                        )
+    def _rank_indices(self, results, query, effective_max):
+        """Return global indices of ``results`` ordered most→least relevant.
 
-                    logger.info(
-                        f"Cross-engine filtering kept {len(final_results)} out of {len(results)} results without reordering"
-                    )
-                    return self._prepare_and_return(
-                        final_results,
-                        reindex=reindex,
-                        start_index=start_index,
-                    )
+        A pool that fits in a single context window (``len <=
+        max_context_items``) issues exactly one LLM call, preserving historical
+        behavior. Larger pools are split into ``max_context_items`` chunks,
+        ranked independently, and round-robin merged so the best of every batch
+        surfaces into the head — no candidate beyond the first chunk is silently
+        dropped, which was the previous behavior.
 
-                # Create ranked results list (reordering)
-                ranked_results = []
-                for idx in ranked_indices:
-                    if 0 <= idx < len(results):
-                        ranked_results.append(results[idx])
+        Returns ``None`` only when *every* batch failed to parse (caller falls
+        back to the capped unranked slice); ``[]`` when batches parsed but kept
+        nothing (caller falls back to the top-10 originals).
+        """
+        # Bound LLM cost: never rank more candidates than we could keep, but
+        # always consider at least one full context window.
+        candidate_cap = max(effective_max, self.max_context_items)
+        candidates = list(enumerate(results))[:candidate_cap]
 
-                # If filtering removed everything, return top results
-                if not ranked_results and results:
-                    logger.info(
-                        "Cross-engine filtering removed all results, returning top 10 originals instead"
-                    )
-                    return self._prepare_and_return(
-                        results[: min(10, len(results))],
-                        reindex=reindex,
-                        start_index=start_index,
-                    )
+        batch_size = max(1, self.max_context_items)
+        batches = [
+            candidates[i : i + batch_size]
+            for i in range(0, len(candidates), batch_size)
+        ]
 
-                # Limit results if needed
-                max_filtered = min(self.max_results, len(ranked_results))
-                final_results = ranked_results[:max_filtered]
+        per_batch_orders = []
+        any_parsed = False
+        for batch in batches:
+            order = self._rank_batch(batch, query)
+            if order is None:
+                continue
+            any_parsed = True
+            if order:
+                per_batch_orders.append(order)
 
+        if not any_parsed:
+            return None
+        if not per_batch_orders:
+            return []
+        if len(per_batch_orders) == 1:
+            return per_batch_orders[0]
+
+        # Round-robin merge: take each batch's top pick, then each batch's
+        # second pick, and so on. Surfaces the best of every batch without
+        # needing cross-batch score calibration.
+        merged = []
+        longest = max(len(order) for order in per_batch_orders)
+        for rank in range(longest):
+            for order in per_batch_orders:
+                if rank < len(order):
+                    merged.append(order[rank])
+        return merged
+
+    def filter_results(
+        self,
+        results: List[Dict],
+        query: str,
+        reorder=None,
+        reindex=None,
+        start_index=0,
+        max_results=None,
+        **kwargs,
+    ) -> List[Dict]:
+        """
+        Filter and rank search results from multiple engines by relevance.
+
+        Args:
+            results: Combined list of search results from all engines
+            query: The original search query
+            reorder: Whether to reorder results by relevance (default: use instance default)
+            reindex: Whether to update result indices after filtering (default: use instance default)
+            start_index: Starting index for the results (used for continuous indexing)
+            max_results: Per-call override for the maximum number of results to
+                keep. Falls back to the instance ``max_results`` when None.
+            **kwargs: Additional parameters
+
+        Returns:
+            Filtered list of search results
+        """
+        # Use instance defaults if not specified
+        if reorder is None:
+            reorder = self.default_reorder
+        if reindex is None:
+            reindex = self.default_reindex
+
+        effective_max = (
+            self.max_results if max_results is None else int(max_results)
+        )
+
+        if not self.model or len(results) <= 10:  # Don't filter if few results
+            return self._prepare_and_return(
+                results[: min(effective_max, len(results))],
+                reindex=reindex,
+                start_index=start_index,
+            )
+
+        ranked_indices = self._rank_indices(results, query, effective_max)
+
+        if ranked_indices is None:
+            logger.info(
+                "Cross-engine filtering could not rank results, returning capped originals"
+            )
+            return self._prepare_and_return(
+                results[: min(effective_max, len(results))],
+                reindex=reindex,
+                start_index=start_index,
+            )
+
+        # If not reordering, just filter based on the indices (keep originals'
+        # relative order).
+        if not reorder:
+            filtered_results = [results[idx] for idx in sorted(ranked_indices)]
+            final_results = filtered_results[
+                : min(effective_max, len(filtered_results))
+            ]
+
+            if not final_results and results:
                 logger.info(
-                    f"Cross-engine filtering kept {len(final_results)} out of {len(results)} results with reordering={reorder}, reindex={reindex}"
+                    "Cross-engine filtering removed all "
+                    "results, returning top 10 originals"
                 )
                 return self._prepare_and_return(
-                    final_results,
+                    results[: min(10, len(results))],
                     reindex=reindex,
                     start_index=start_index,
                 )
+
             logger.info(
-                "Could not find JSON array in response, returning original results"
+                f"Cross-engine filtering kept {len(final_results)} out of {len(results)} results without reordering"
             )
             return self._prepare_and_return(
-                results[: min(self.max_results, len(results))],
+                final_results,
                 reindex=reindex,
                 start_index=start_index,
             )
 
-        except Exception:
-            logger.exception("Cross-engine filtering error")
+        # Create ranked results list (reordering)
+        ranked_results = [results[idx] for idx in ranked_indices]
+
+        # If filtering removed everything, return top results
+        if not ranked_results and results:
+            logger.info(
+                "Cross-engine filtering removed all results, returning top 10 originals instead"
+            )
             return self._prepare_and_return(
-                results[: min(self.max_results, len(results))],
+                results[: min(10, len(results))],
                 reindex=reindex,
                 start_index=start_index,
             )
+
+        # Limit results if needed
+        final_results = ranked_results[
+            : min(effective_max, len(ranked_results))
+        ]
+
+        logger.info(
+            f"Cross-engine filtering kept {len(final_results)} out of {len(results)} results with reordering={reorder}, reindex={reindex}"
+        )
+        return self._prepare_and_return(
+            final_results,
+            reindex=reindex,
+            start_index=start_index,
+        )

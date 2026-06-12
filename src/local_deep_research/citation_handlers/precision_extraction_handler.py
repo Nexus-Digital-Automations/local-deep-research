@@ -45,7 +45,7 @@ class PrecisionExtractionHandler(BaseCitationHandler):
     ) -> Dict[str, Any]:
         """Initial analysis with precision extraction."""
         documents = self._create_documents(search_results)
-        formatted_sources = self._format_sources(documents)
+        formatted_sources = self._format_sources_block(documents)
 
         # Determine question type for targeted extraction
         question_type = self._identify_question_type(query)
@@ -98,7 +98,7 @@ Format: Start with the direct, precise answer, then explain with citations."""
         documents = self._create_documents(
             search_results, nr_of_links=nr_of_links
         )
-        formatted_sources = self._format_sources(documents)
+        formatted_sources = self._format_sources_block(documents)
 
         question_type = self._identify_question_type(question)
 

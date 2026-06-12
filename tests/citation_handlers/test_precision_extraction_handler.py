@@ -747,3 +747,24 @@ class TestPrecisionExtractionDimensionContextAwareness:
             "How wide is the river?"
         )
         assert question_type == "dimension"
+
+
+class TestPrecisionExtractionPromptInjectionGuard:
+    """The precision-extraction prompt must fence untrusted source content."""
+
+    def test_analyze_initial_guards_sources(
+        self, mock_llm, sample_search_results
+    ):
+        from local_deep_research.citation_handlers.precision_extraction_handler import (
+            PrecisionExtractionHandler,
+        )
+        from local_deep_research.citation_handlers.source_guard import (
+            UNTRUSTED_SOURCES_GUARD,
+        )
+
+        handler = PrecisionExtractionHandler(llm=mock_llm)
+        handler.analyze_initial("Test query", sample_search_results)
+
+        prompt = mock_llm.invoke.call_args[0][0]
+        assert UNTRUSTED_SOURCES_GUARD in prompt
+        assert "<sources>" in prompt and "</sources>" in prompt

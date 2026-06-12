@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Union
 from langchain_core.documents import Document
 from loguru import logger
 
+from .source_guard import UNTRUSTED_SOURCES_GUARD, guard_untrusted_sources
+
 
 class BaseCitationHandler(ABC):
     """Abstract base class for citation handlers."""
@@ -100,6 +102,10 @@ class BaseCitationHandler(ABC):
                 )
         return documents
 
+    # Backward-compat alias; the canonical text lives in source_guard so the
+    # topic-organization strategy can reuse it without importing this class.
+    _UNTRUSTED_SOURCES_GUARD = UNTRUSTED_SOURCES_GUARD
+
     def _format_sources(self, documents: List[Document]) -> str:
         """Format sources with numbers for citation."""
         sources = []
@@ -107,6 +113,17 @@ class BaseCitationHandler(ABC):
             source_id = doc.metadata["index"]
             sources.append(f"[{source_id}] {doc.page_content}")
         return "\n\n".join(sources)
+
+    def _format_sources_block(self, documents: List[Document]) -> str:
+        """Return citation sources wrapped as a guarded, untrusted-data block.
+
+        Centralizes prompt-injection mitigation: any web page content destined
+        for a synthesis prompt should go through here. ``_format_sources``
+        remains the raw ``[n] content`` formatter (used internally and where a
+        bare list is expected). When there are no documents, returns an empty
+        string so callers render nothing rather than empty fences.
+        """
+        return guard_untrusted_sources(self._format_sources(documents))
 
     @abstractmethod
     def analyze_initial(

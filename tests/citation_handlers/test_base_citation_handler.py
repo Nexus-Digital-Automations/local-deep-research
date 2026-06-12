@@ -392,6 +392,38 @@ class TestFormatSources:
         assert result == "[5] Line 1\nLine 2\nLine 3"
 
 
+class TestFormatSourcesBlock:
+    """Tests for the guarded _format_sources_block wrapper."""
+
+    def test_wraps_sources_in_guard_and_fence(self):
+        from local_deep_research.citation_handlers.source_guard import (
+            UNTRUSTED_SOURCES_GUARD,
+        )
+
+        mock_llm = MagicMock()
+        handler = ConcreteCitationHandler(mock_llm)
+
+        docs = [
+            Document(page_content="First content", metadata={"index": 1}),
+            Document(page_content="Second content", metadata={"index": 2}),
+        ]
+
+        result = handler._format_sources_block(docs)
+
+        assert UNTRUSTED_SOURCES_GUARD in result
+        assert "<sources>" in result and "</sources>" in result
+        # The numbered citation list is preserved inside the fence so [n]
+        # citation semantics and downstream parsing are unaffected.
+        assert "[1] First content" in result
+        assert "[2] Second content" in result
+
+    def test_empty_documents_return_empty_string(self):
+        mock_llm = MagicMock()
+        handler = ConcreteCitationHandler(mock_llm)
+
+        assert handler._format_sources_block([]) == ""
+
+
 class TestAbstractMethods:
     """Tests that abstract methods are properly defined."""
 
